@@ -90,6 +90,22 @@
         .magic-progress-track { width: 300px; height: 4px; background: rgba(90, 122, 98, 0.3); border-radius: 2px; overflow: hidden; position: relative; }
         #magic-progress-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #d4af37, #a8ff3e); box-shadow: 0 0 15px #a8ff3e; transition: width 0.1s linear; }
 
+        /* ================= 手势提示条 ================= */
+        #gesture-hint {
+            position: fixed; bottom: 220px; left: 50%; transform: translateX(-50%);
+            z-index: 200; pointer-events: none;
+            display: flex; align-items: center; gap: 10px;
+            background: rgba(5, 14, 10, 0.65); backdrop-filter: blur(8px);
+            border: 1px solid rgba(90, 122, 98, 0.4);
+            border-radius: 30px; padding: 10px 22px;
+            transition: opacity 0.5s ease;
+            opacity: 0;
+        }
+        #gesture-hint.visible { opacity: 1; }
+        .hint-icon { font-size: 1.3rem; }
+        .hint-text { font-family: 'Georgia', serif; font-style: italic; font-size: 0.9rem; color: #a8c8a0; letter-spacing: 1px; white-space: nowrap; }
+        .hint-text em { color: #a8ff3e; font-style: normal; }
+
         /* ================= 光标与摄像头 ================= */
         .camera-feed { position: fixed; bottom: 20px; right: 20px; width: 140px; height: 105px; border: 1px solid #5a7a62; border-radius: 8px; overflow: hidden; z-index: 100; opacity: 0.3; transform: scaleX(-1); }
         .camera-feed video, .camera-feed canvas { width: 100%; height: 100%; object-fit: cover; }
@@ -354,6 +370,11 @@
         </div>
     </div>
 
+    <div id="gesture-hint">
+        <span class="hint-icon">🖐</span>
+        <span class="hint-text" id="hint-text"></span>
+    </div>
+
     <div class="camera-feed"><video id="input_video" autoplay playsinline></video><canvas id="output_canvas" width="320" height="240"></canvas></div>
     <div id="hand-cursor"><svg class="progress-ring" viewBox="0 0 80 80"><circle class="ring-circle" cx="40" cy="40" r="35"></circle></svg></div>
     <div class="tarot-container"><div class="carousel" id="carousel"></div></div>
@@ -481,7 +502,7 @@
                     const el = document.getElementById(`card-${i}`);
                     setTimeout(() => { el.style.transition = 'transform 1.2s cubic-bezier(0.25, 1, 0.5, 1)'; el.style.transform = `rotateY(${theta * i}deg) translateZ(${radius}px) scale(1)`; setTimeout(() => { el.style.transition = 'none'; }, 1200); }, i * 15);
                 });
-                setTimeout(() => { gameState = 'PLAYING'; }, totalCards * 15 + 1200);
+                setTimeout(() => { gameState = 'PLAYING'; setHint('👈👉', '手移到左右两侧<em>滚动</em>牌阵，居中<em>握拳</em> 1 秒选牌 · Move hand to scroll, <em>fist</em> to draw'); }, totalCards * 15 + 1200);
             }, 1200);
         }
 
@@ -548,16 +569,27 @@
             }
 
             if (gameState === 'PLAYING') {
-                if (palmX < 0.3) { targetScrollSpeed = 1.5 + ((0.3 - palmX) / 0.3 * 4); resetFist(); } 
-                else if (palmX > 0.7) { targetScrollSpeed = -(1.5 + ((palmX - 0.7) / 0.3 * 4)); resetFist(); } 
-                else {
-                    targetScrollSpeed = 0; const centerIdx = getCenterCardIndex();
+                // 连续速度曲线：中间区域慢速微滚，越靠边越快
+                // palmX: 0=最左, 1=最右，中心=0.5
+                const distFromCenter = palmX - 0.5; // -0.5 ~ +0.5
+                const absD = Math.abs(distFromCenter);
+                if (absD < 0.12) {
+                    // 中心死区：停止滚动，可以握拳选牌
+                    targetScrollSpeed = 0;
+                    const centerIdx = getCenterCardIndex();
                     if (isFist && !tarotDeck[centerIdx].drawn) {
                         cursor.classList.add('charging'); fistHoldTime += dt;
                         if (Math.random() > 0.5) spawnParticle(x, y, 'petal');
                         ringCircle.style.strokeDashoffset = 220 - (220 * Math.min(fistHoldTime / 1000, 1));
-                        if (fistHoldTime >= 1000) { drawCurrentCard(centerIdx, x, y); resetFist(); gameState = 'ANIMATING'; setTimeout(() => { if(drawnCards.length < 3) gameState = 'PLAYING'; }, 2500); }
+                        if (fistHoldTime >= 1000) { drawCurrentCard(centerIdx, x, y); resetFist(); gameState = 'ANIMATING'; hideHint(); setTimeout(() => { if(drawnCards.length < 3) { gameState = 'PLAYING'; const remaining = 3 - drawnCards.length; setHint('✊', `再选 <em>${remaining}</em> 张牌 · Draw <em>${remaining}</em> more card${remaining > 1 ? 's' : ''}`); } }, 2500); }
                     } else { resetFist(); }
+                } else {
+                    // 过渡区：用 smoothstep 曲线，从慢到快
+                    resetFist();
+                    const t = Math.min((absD - 0.12) / 0.38, 1); // 0→1 as hand moves 0.12→0.5
+                    const smooth = t * t * (3 - 2 * t); // smoothstep
+                    const speed = 0.4 + smooth * 5.5; // 最慢 0.4，最快 5.9
+                    targetScrollSpeed = distFromCenter > 0 ? -speed : speed;
                 }
             }
 
@@ -568,6 +600,7 @@
                     document.getElementById('magic-progress-bar').style.width = `${Math.min(readHoldTime / 2000, 1) * 100}%`;
                     if (readHoldTime >= 2000) {
                         gameState = 'ANIMATING';
+                        hideHint();
                         document.getElementById('pre-read-ui').classList.remove('visible');
                         setTimeout(startReading, 500); 
                     }
@@ -576,21 +609,43 @@
         }
         function resetFist() { fistHoldTime = 0; cursor.classList.remove('charging'); ringCircle.style.strokeDashoffset = 220; }
 
+        /* ================= 手势提示系统 ================= */
+        const gestureHint = document.getElementById('gesture-hint');
+        const hintIcon = gestureHint.querySelector('.hint-icon');
+        const hintTextEl = document.getElementById('hint-text');
+
+        function setHint(icon, html, visible = true) {
+            hintIcon.textContent = icon;
+            hintTextEl.innerHTML = html;
+            gestureHint.classList.toggle('visible', visible);
+        }
+        function hideHint() { gestureHint.classList.remove('visible'); }
+
         /* ================= 5. Card Drawing & Display ================= */
         function drawCurrentCard(idx, x, y) {
             playSelectSound(); for(let i=0; i<30; i++) spawnParticle(x, y, 'spark');
-            const cardData = tarotDeck[idx]; cardData.drawn = true; drawnCards.push(cardData);
+            const cardData = tarotDeck[idx]; cardData.drawn = true;
+            // 随机决定正逆位
+            cardData.reversed = Math.random() < 0.3; // 30% 概率逆位
+            drawnCards.push(cardData);
             
             const cardEl = document.getElementById(`card-${idx}`); if(cardEl) cardEl.style.opacity = '0';
             const closeUpContainer = document.getElementById('close-up-container');
+            const revStyle = cardData.reversed ? 'transform: rotateY(180deg) rotate(180deg) scale(1.15);' : '';
             closeUpContainer.innerHTML = `<div class="close-up-card shaking"><div class="card-back"></div><div class="card-front" style="background-image: url('${cardData.imgPath}')"></div></div>`;
             const closeUpCard = closeUpContainer.querySelector('.close-up-card');
 
-            setTimeout(() => { closeUpCard.classList.remove('shaking'); closeUpCard.classList.add('flipped'); playFlipSound(); applyCardLighting(); }, 400);
+            setTimeout(() => { 
+                closeUpCard.classList.remove('shaking'); 
+                closeUpCard.classList.add('flipped'); 
+                if (cardData.reversed) closeUpCard.style.transform = 'rotateY(180deg) rotate(180deg) scale(1.15)';
+                playFlipSound(); applyCardLighting(); 
+            }, 400);
             setTimeout(() => {
                 closeUpContainer.innerHTML = ''; 
                 const ui = document.createElement('div'); ui.className = 'drawn-card';
-                ui.innerHTML = `<div class="drawn-card-back"></div><div class="drawn-card-front" style="background-image: url('${cardData.imgPath}')"></div>`;
+                const rotateStyle = cardData.reversed ? 'transform: rotateY(180deg) rotate(180deg);' : 'transform: rotateY(180deg);';
+                ui.innerHTML = `<div class="drawn-card-back"></div><div class="drawn-card-front" style="background-image: url('${cardData.imgPath}'); ${cardData.reversed ? 'transform: rotateY(180deg) rotate(180deg);' : ''}"></div>`;
                 document.getElementById('drawn-cards-container').appendChild(ui);
                 if(drawnCards.length === 3) { setTimeout(triggerTripleCloseup, 800); }
             }, 2300);
@@ -603,13 +658,16 @@
                 : ['过去', '现在', '未来'];
 
             const row = document.getElementById('triple-cards-row');
-            row.innerHTML = drawnCards.map((c, i) => `
+            row.innerHTML = drawnCards.map((c, i) => {
+                const reversedLabel = c.reversed ? (readingLang === 'zh' ? ' · 逆位' : ' · Reversed') : '';
+                const imgRotate = c.reversed ? 'transform: rotate(180deg); transform-origin: center;' : '';
+                return `
                 <div class="triple-card-item" id="triple-item-${i}">
                     <div class="triple-card-position">${positions[i]}</div>
-                    <div class="triple-card-frame" id="triple-frame-${i}" style="background-image:url('${c.imgPath}')"></div>
-                    <div class="triple-card-name">${readingLang === 'zh' ? c.nameZH : c.nameEN}</div>
-                </div>
-            `).join('');
+                    <div class="triple-card-frame" id="triple-frame-${i}" style="background-image:url('${c.imgPath}'); ${imgRotate}"></div>
+                    <div class="triple-card-name">${readingLang === 'zh' ? c.nameZH : c.nameEN}<span style="color:#d4af37; font-size:0.8em;">${reversedLabel}</span></div>
+                </div>`;
+            }).join('');
 
             const overlay = document.getElementById('triple-closeup-overlay');
             const hint = document.getElementById('triple-closeup-hint');
@@ -734,23 +792,29 @@
             const showcaseLayer = document.getElementById('showcase-layer');
             const showcaseContainer = document.getElementById('showcase-cards-container');
             
-            showcaseContainer.innerHTML = drawnCards.map((c, i) => `
+            showcaseContainer.innerHTML = drawnCards.map((c, i) => {
+                const reversedLabel = c.reversed ? (readingLang === 'zh' ? '逆位' : 'Reversed') : '';
+                const imgRotate = c.reversed ? 'filter: none; transform: rotate(180deg);' : '';
+                return `
                 <div class="showcase-card" id="showcase-card-${i}">
                     <div class="card-inner">
                         <div class="card-back"></div>
-                        <div class="card-front" style="background-image:url('${c.imgPath}')">
-                            <div class="card-label" style="font-size:0.9rem;"><h2>${readingLang === 'zh' ? c.nameZH : c.nameEN}</h2></div>
+                        <div class="card-front" style="background-image:url('${c.imgPath}'); ${imgRotate}">
+                            <div class="card-label" style="font-size:0.9rem; ${c.reversed ? 'transform: rotate(180deg);' : ''}">
+                                <h2>${readingLang === 'zh' ? c.nameZH : c.nameEN}</h2>
+                                ${reversedLabel ? `<span style="font-size:0.75rem; color:#d4af37;">${reversedLabel}</span>` : ''}
+                            </div>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
 
             showcaseLayer.classList.add('visible');
             drawnCards.forEach((c, i) => {
                 setTimeout(() => { playFlipSound(); const scCard = document.getElementById(`showcase-card-${i}`); scCard.classList.add('revealed', 'reveal-glow'); applyCardLighting(); }, 800 + i * 500); 
             });
 
-            setTimeout(() => { document.getElementById('pre-read-ui').classList.add('visible'); gameState = 'WAITING_FOR_READING_GESTURE'; }, 800 + drawnCards.length * 500 + 500);
+            setTimeout(() => { document.getElementById('pre-read-ui').classList.add('visible'); gameState = 'WAITING_FOR_READING_GESTURE'; setHint('🖐', '张开手掌保持 2 秒，开启解读 · <em>Open palm</em> for 2s to begin reading'); }, 800 + drawnCards.length * 500 + 500);
         }
 
         /* ================= 7. API, Storage & Healing Prompts ================= */
@@ -782,7 +846,8 @@
             readingModal.classList.add('hidden'); document.getElementById('showcase-layer').classList.remove('visible'); document.getElementById('pre-read-ui').classList.remove('visible'); 
             const tripleOverlay = document.getElementById('triple-closeup-overlay');
             tripleOverlay.classList.remove('active'); tripleOverlay.style.display = '';
-            document.getElementById('drawn-cards-container').style.display = 'flex'; document.getElementById('drawn-cards-container').innerHTML = ''; drawnCards = []; gameState = 'PLAYING'; 
+            document.getElementById('drawn-cards-container').style.display = 'flex'; document.getElementById('drawn-cards-container').innerHTML = ''; drawnCards = []; gameState = 'PLAYING';
+            setHint('👈👉', '手移到左右两侧<em>滚动</em>牌阵，居中<em>握拳</em> 1 秒选牌 · Move hand to scroll, <em>fist</em> to draw');
         });
 
         async function startReading() {
@@ -800,7 +865,14 @@
             const sysBaseEn = "You are a mystic woodland tarot reader and psychological healer. Your reading MUST be strictly structured into three sections:\n\n[Card Interpretation]: Vividly describe the artistic and poetic essence of the cards.\n[Echo of the Question]: Strip away the mysticism, integrate the user's specific question, and offer deep, empathetic, and comforting psychological counseling.\n[Actionable Advice]: Provide practical, gentle, and empowering next steps.\n\nCRITICAL: DO NOT use any Markdown formatting symbols (like * or #) in your response. Use the bracketed titles above to separate sections.";
             
             const sysPrompt = `${readingLang === 'zh' ? sysBaseZh : sysBaseEn} ${langConstraint} ${specificTopicPrompt}`;
-            const cardNamesStr = drawnCards.map((c, i) => `${i+1}. ${readingLang === 'zh' ? ['过去','现在','未来'][i] : ['Past','Present','Future'][i]}: ${readingLang === 'zh' ? c.nameZH : c.nameEN}`).join('\n');
+            const cardNamesStr = drawnCards.map((c, i) => {
+                const pos = readingLang === 'zh' ? ['过去','现在','未来'][i] : ['Past','Present','Future'][i];
+                const name = readingLang === 'zh' ? c.nameZH : c.nameEN;
+                const orientation = c.reversed 
+                    ? (readingLang === 'zh' ? '（逆位）' : ' (Reversed)') 
+                    : (readingLang === 'zh' ? '（正位）' : ' (Upright)');
+                return `${i+1}. ${pos}: ${name}${orientation}`;
+            }).join('\n');
             const userPrompt = readingLang === 'zh' ? `我的困惑是：“${finalUserQuestion}”\n我抽到了三张牌：\n${cardNamesStr}\n请按照三段式结构，给出深刻且抚慰人心的纯中文解读。` : `My current situation is: "${finalUserQuestion}"\nI drew three cards:\n${cardNamesStr}\nPlease provide a profound and comforting reading strictly in English following the 3-part structure.`;
 
             let fullResponseText = ""; 
